@@ -62,9 +62,9 @@ class diff_CSDI(nn.Module):
             embedding_dim=config["diffusion_embedding_dim"],
         )
 
-        self.input_projection = Conv1d_with_init(inputdim, self.channels, 1)
-        self.output_projection1 = Conv1d_with_init(self.channels, self.channels, 1)
-        self.output_projection2 = Conv1d_with_init(self.channels, 1, 1)
+        self.input_projection = Conv2d_with_init(inputdim, self.channels, 1)
+        self.output_projection1 = Conv2d_with_init(self.channels, self.channels, 1)
+        self.output_projection2 = Conv2d_with_init(self.channels, 1, 1)  # maybe (self.channels, inputdim, 1)
         nn.init.zeros_(self.output_projection2.weight)
 
         self.residual_layers = nn.ModuleList(
@@ -82,12 +82,10 @@ class diff_CSDI(nn.Module):
     def forward(self, x, cond_info, diffusion_step):
         B, inputdim, K, L = x.shape
 
-        x = x.reshape(B, inputdim, K * L)
-        x = self.input_projection(x)
+        x = self.input_projection(x)  # (B,channel,K,L)
         x = F.relu(x)
-        x = x.reshape(B, self.channels, K, L)
 
-        diffusion_emb = self.diffusion_embedding(diffusion_step)
+        diffusion_emb = self.diffusion_embedding(diffusion_step)  #(1, diffusion_embedding_dim)
 
         skip = []
         for layer in self.residual_layers:
@@ -95,7 +93,6 @@ class diff_CSDI(nn.Module):
             skip.append(skip_connection)
 
         x = torch.sum(torch.stack(skip), dim=0) / math.sqrt(len(self.residual_layers))  # (B,channel,K,L)
-        x = x.reshape(B, self.channels, K * L)  #we can skip reshaping if we use conv2d
         x = self.output_projection1(x)  # (B,channel,K*L)
         x = F.relu(x)
         x = self.output_projection2(x)  # (B,1,K*L)  what output shape do we want? I think its b,c,k,l
