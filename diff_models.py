@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from Transformer import TransformerEncoder
 import math
 
 
@@ -13,6 +14,11 @@ def get_torch_trans(heads=8, layers=1, channels=64):
 
 def Conv1d_with_init(in_channels, out_channels, kernel_size):
     layer = nn.Conv1d(in_channels, out_channels, kernel_size)
+    nn.init.kaiming_normal_(layer.weight)
+    return layer
+
+def Conv2d_with_init(in_channels, out_channels, kernel_size):
+    layer = nn.Conv2d(in_channels, out_channels, kernel_size)
     nn.init.kaiming_normal_(layer.weight)
     return layer
 
@@ -88,11 +94,11 @@ class diff_CSDI(nn.Module):
             x, skip_connection = layer(x, cond_info, diffusion_emb)
             skip.append(skip_connection)
 
-        x = torch.sum(torch.stack(skip), dim=0) / math.sqrt(len(self.residual_layers))
-        x = x.reshape(B, self.channels, K * L)
+        x = torch.sum(torch.stack(skip), dim=0) / math.sqrt(len(self.residual_layers))  # (B,channel,K,L)
+        x = x.reshape(B, self.channels, K * L)  #we can skip reshaping if we use conv2d
         x = self.output_projection1(x)  # (B,channel,K*L)
         x = F.relu(x)
-        x = self.output_projection2(x)  # (B,1,K*L)
+        x = self.output_projection2(x)  # (B,1,K*L)  what output shape do we want? I think its b,c,k,l
         x = x.reshape(B, K, L)
         return x
 
@@ -101,54 +107,30 @@ class ResidualBlock(nn.Module):
     def __init__(self, side_dim, channels, diffusion_embedding_dim, nheads):
         super().__init__()
         self.diffusion_projection = nn.Linear(diffusion_embedding_dim, channels)
-        self.cond_projection = Conv1d_with_init(side_dim, 2 * channels, 1)
-        self.mid_projection = Conv1d_with_init(channels, 2 * channels, 1)
-        self.output_projection = Conv1d_with_init(channels, 2 * channels, 1)
-
-        self.time_layer = get_torch_trans(heads=nheads, layers=1, channels=channels)
-        self.feature_layer = get_torch_trans(heads=nheads, layers=1, channels=channels)
-
-    def forward_time(self, y, base_shape):
-        B, channel, K, L = base_shape
-        if L == 1:
-            return y
-        y = y.reshape(B, channel, K, L).permute(0, 2, 1, 3).reshape(B * K, channel, L)
-        y = self.time_layer(y.permute(2, 0, 1)).permute(1, 2, 0)
-        y = y.reshape(B, K, channel, L).permute(0, 2, 1, 3).reshape(B, channel, K * L)
-        return y
-
-    def forward_feature(self, y, base_shape):
-        B, channel, K, L = base_shape
-        if K == 1:
-            return y
-        y = y.reshape(B, channel, K, L).permute(0, 3, 1, 2).reshape(B * L, channel, K)
-        y = self.feature_layer(y.permute(2, 0, 1)).permute(1, 2, 0)
-        y = y.reshape(B, L, channel, K).permute(0, 2, 3, 1).reshape(B, channel, K * L)
-        return y
+        
+        self.cond_projection = Conv2d_with_init(side_dim, 2 * channels, 1)
+        self.mid_projection = Conv2d_with_init(channels, 2 * channels, 1)
+        self.output_projection = Conv2d_with_init(channels, 2 * channels, 1)
+        
+        self.tensor_transformer = Transformer.TransformerEncoder(channels, nheads, ff_dim=64, num_cells=1)
 
     def forward(self, x, cond_info, diffusion_emb):
         B, channel, K, L = x.shape
         base_shape = x.shape
-        x = x.reshape(B, channel, K * L)
-
-        diffusion_emb = self.diffusion_projection(diffusion_emb).unsqueeze(-1)  # (B,channel,1)
+        
+        diffusion_emb = self.diffusion_projection(diffusion_emb).unsqueeze(-1).unsqueeze(-1)  # (B,channel,1,1)
         y = x + diffusion_emb
 
-        y = self.forward_time(y, base_shape)
-        y = self.forward_feature(y, base_shape)  # (B,channel,K*L)
-        y = self.mid_projection(y)  # (B,2*channel,K*L)
+        y = self.tensor_transformer.forward(y.permute(0, 3, 2, 1)  # (B,L,K,C)
+        y = self.mid_projection(y.permute(0, 3, 2, 1))  # (B,2*channel,K,L)
 
         _, cond_dim, _, _ = cond_info.shape
-        cond_info = cond_info.reshape(B, cond_dim, K * L)
-        cond_info = self.cond_projection(cond_info)  # (B,2*channel,K*L)
+        cond_info = self.cond_projection(cond_info)  # (B,2*channel,K,L)
         y = y + cond_info
 
         gate, filter = torch.chunk(y, 2, dim=1)
-        y = torch.sigmoid(gate) * torch.tanh(filter)  # (B,channel,K*L)
+        y = torch.sigmoid(gate) * torch.tanh(filter)  # (B,channel,K,L)
         y = self.output_projection(y)
 
         residual, skip = torch.chunk(y, 2, dim=1)
-        x = x.reshape(base_shape)
-        residual = residual.reshape(base_shape)
-        skip = skip.reshape(base_shape)
         return (x + residual) / math.sqrt(2.0), skip
