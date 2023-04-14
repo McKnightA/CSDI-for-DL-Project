@@ -25,7 +25,7 @@ class CSDI_base(nn.Module):
         config_diff = config["diffusion"]
         config_diff["side_dim"] = self.emb_total_dim
 
-        input_dim = 1 if self.is_unconditional == True else 2
+        input_dim = 1 if self.is_unconditional == True else 2  # should this be our feature embedding dim else twice our feature embedding dim?
         self.diffmodel = diff_CSDI(config_diff, input_dim)
 
         # parameters for diffusion models
@@ -38,7 +38,19 @@ class CSDI_base(nn.Module):
             self.beta = np.linspace(
                 config_diff["beta_start"], config_diff["beta_end"], self.num_steps
             )
-
+        elif config_diff["schedule"] == "cosine":
+            def cos_calc(t):
+                return math.cos((t + 0.008) / 1.008 * math.pi / 2) ** 2
+            betas = []
+            for i in range(self.num_steps):
+                t1 = i / self.num_steps
+                t2 = (i + 1) / self.num_steps
+                betas.append(min(1 - cos_calc(t2) / cos_calc(t1), 0.999))
+            self.beta = np.array(betas)
+        elif config_diff["schedule"] == "sig":
+            sig = nn.Sigmoid()
+            self.beta = sig(torch.Tensor(np.linespace(config["beta_start"], config["beta_end"], self.num_steps).numpy()
+            
         self.alpha_hat = 1 - self.beta
         self.alpha = np.cumprod(self.alpha_hat)
         self.alpha_torch = torch.tensor(self.alpha).float().to(self.device).unsqueeze(1).unsqueeze(1)
@@ -47,7 +59,7 @@ class CSDI_base(nn.Module):
         pe = torch.zeros(pos.shape[0], pos.shape[1], d_model).to(self.device)
         position = pos.unsqueeze(2)
         div_term = 1 / torch.pow(
-            10000.0, torch.arange(0, d_model, 2).to(self.device) / d_model
+            10000.0, torch.arange(0, d_model, 2).to(self.device) / d_model  # should we change the 10000.0 to a new max_len parameter?
         )
         pe[:, :, 0::2] = torch.sin(position * div_term)
         pe[:, :, 1::2] = torch.cos(position * div_term)
@@ -98,7 +110,7 @@ class CSDI_base(nn.Module):
 
         return side_info
 
-    def calc_loss_valid(
+    def calc_loss_valid(  # may not require adjustment
         self, observed_data, cond_mask, observed_mask, side_info, is_train
     ):
         loss_sum = 0
@@ -109,7 +121,7 @@ class CSDI_base(nn.Module):
             loss_sum += loss.detach()
         return loss_sum / self.num_steps
 
-    def calc_loss(
+    def calc_loss(  # TODO: requires new shape accommodation
         self, observed_data, cond_mask, observed_mask, side_info, is_train, set_t=-1
     ):
         B, K, L = observed_data.shape
@@ -131,7 +143,7 @@ class CSDI_base(nn.Module):
         loss = (residual ** 2).sum() / (num_eval if num_eval > 0 else 1)
         return loss
 
-    def set_input_to_diffmodel(self, noisy_data, observed_data, cond_mask):
+    def set_input_to_diffmodel(self, noisy_data, observed_data, cond_mask):  # TODO: requires new shape accommodation
         if self.is_unconditional == True:
             total_input = noisy_data.unsqueeze(1)  # (B,1,K,L)
         else:
@@ -141,7 +153,7 @@ class CSDI_base(nn.Module):
 
         return total_input
 
-    def impute(self, observed_data, cond_mask, side_info, n_samples):
+    def impute(self, observed_data, cond_mask, side_info, n_samples):  # TODO: requires new shape accommodation
         B, K, L = observed_data.shape
 
         imputed_samples = torch.zeros(B, n_samples, K, L).to(self.device)
@@ -182,7 +194,7 @@ class CSDI_base(nn.Module):
             imputed_samples[:, i] = current_sample.detach()
         return imputed_samples
 
-    def forward(self, batch, is_train=1):
+    def forward(self, batch, is_train=1):  # may not require adjustment
         (
             observed_data,
             observed_mask,
@@ -206,7 +218,7 @@ class CSDI_base(nn.Module):
 
         return loss_func(observed_data, cond_mask, observed_mask, side_info, is_train)
 
-    def evaluate(self, batch, n_samples):
+    def evaluate(self, batch, n_samples):  # may not require adjustment
         (
             observed_data,
             observed_mask,
